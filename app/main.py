@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import time
+import asyncio
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 import streamlit as st
@@ -13,6 +14,9 @@ from app.database import init_db, save_to_db, get_history
 from app.models import ClaimAnalysis
 from app.agents import run_factual_claim_extractor
 from app.pipeline import batch_process_claims
+from app.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -25,6 +29,14 @@ st.set_page_config(page_title="Adversarial Fact Checker", layout="wide", page_ic
 # Custom CSS for a cleaner, more professional look
 st.markdown("""
 <style>
+    /* Reduce default top padding so the title sits higher */
+    .block-container {
+        padding-top: 1.5rem !important;
+    }
+    header[data-testid="stHeader"] {
+        height: 2rem;
+    }
+
     /* Global Font */
     html, body, [class*="css"] {
         font-family: 'Inter', sans-serif;
@@ -54,10 +66,17 @@ if "analysis_results" not in st.session_state:
 if "processing_complete" not in st.session_state:
     st.session_state.processing_complete = False
 
+
+def get_selected_rows(dataframe_event: Any) -> List[int]:
+    event_dict = dict(dataframe_event) if dataframe_event else {}
+    selection = event_dict.get("selection", {})
+    rows = selection.get("rows", []) if isinstance(selection, dict) else []
+    return rows if isinstance(rows, list) else []
+
 # SIDEBAR CONFIGURATION
 with st.sidebar:
     st.header("Configuration")
-    provider = st.radio("Select AI Provider", ["Google Gemini", "Microsoft Azure"])
+    provider = st.radio("Select AI Provider", ["Microsoft Azure", "Google Gemini"], index=0)
     
     config: Dict[str, Any] = {}
     if provider == "Google Gemini":
@@ -80,6 +99,7 @@ with st.sidebar:
              st.success("Configuration Loaded")
 
 st.title("Adversarial Fact Checker")
+st.caption("Claims are scored using the NATO Intelligence Evaluation System to determine truthfulness.")
 
 # --- CONTEXT DIALOG (MODAL) ---
 @st.dialog("Claim Analysis Details", width="large")
@@ -131,6 +151,16 @@ tab_new, tab_history = st.tabs(["Analyze", "History"])
 with tab_new:
     report_input = st.text_area("Paste Report / Text to Analyze:", height=150)
 
+    # Optional source metadata — helps the LLM understand provenance
+    with st.expander("Source Details (optional)", expanded=False):
+        meta_cols = st.columns(3)
+        with meta_cols[0]:
+            source_publisher = st.text_input("Publisher / Organisation", placeholder="e.g. WHO, Reuters, Fox News")
+        with meta_cols[1]:
+            source_author = st.text_input("Author(s)", placeholder="e.g. Jane Smith")
+        with meta_cols[2]:
+            source_date = st.text_input("Publication Date", placeholder="e.g. March 2024")
+
     # Run Button Logic
     if st.button("Run Analysis", type="primary"):
         if not report_input.strip():
@@ -143,35 +173,122 @@ with tab_new:
             st.session_state.analysis_results = []
             st.session_state.processing_complete = False
             
+            # Build report text with metadata preamble when provided
+            metadata_parts = []
+            if source_publisher:
+                metadata_parts.append(f"Publisher / Organisation: {source_publisher}")
+            if source_author:
+                metadata_parts.append(f"Author(s): {source_author}")
+            if source_date:
+                metadata_parts.append(f"Publication Date: {source_date}")
+
+            if metadata_parts:
+                metadata_preamble = (
+                    "--- SOURCE METADATA (user-provided, treat as context for evaluating claims) ---\n"
+                    + "\n".join(metadata_parts)
+                    + "\n--- END SOURCE METADATA ---\n\n"
+                )
+                full_report_text = metadata_preamble + report_input
+            else:
+                full_report_text = report_input
+
             with st.status("Initializing Analysis Pipeline...", expanded=True) as status:
                 st.write("🔍 **Phase 1:** Extracting Factual Claims...")
-                claims = run_factual_claim_extractor(report_input, provider, config)
-                
-                if isinstance(claims, list) and len(claims) > 0 and isinstance(claims[0], str) and not claims[0].startswith("Error"):
+                progress_bar = st.progress(0, text="Extracting claims...")
+                progress_status = st.empty()
+                phase1_start = time.perf_counter()
+                logger.info("Analysis started | provider=%s input_len=%d", provider, len(full_report_text))
+
+                # Shared collectors for progress callback
+                _results_collector: List[Dict[str, Any]] = []
+                _progress_lines: List[str] = []
+                score_labels = {
+                    1: "Confirmed True", 2: "Probably True", 3: "Possibly True",
+                    4: "Doubtful", 5: "Improbable", 6: "Uncertain"
+                }
+
+                def _on_progress(completed: int, total: int, result: Dict[str, Any]) -> None:
+                    """Callback fired each time a claim finishes."""
+                    _results_collector.append(result)
+                    score = result.get("arbiter_score", 6)
+                    label = score_labels.get(score, "Unknown")
+                    claim_text = result.get("claim", "")[:90]
+                    _progress_lines.append(
+                        f"✅ Claim {completed}/{total}: *{claim_text}* — **{score} ({label})**"
+                    )
+                    # ── Live progress bar update ──
+                    if total > 0:
+                        progress_bar.progress(
+                            completed / total,
+                            text=f"Analyzed {completed}/{total} claims...",
+                        )
+                        progress_status.markdown(
+                            f"Latest: *{claim_text}* — **{score} ({label})**"
+                        )
+
+                async def _run_full_pipeline() -> tuple:
+                    """Single async entry-point: extract claims then batch-process.
+                    Keeps one event loop alive so the AsyncAzureOpenAI client stays valid."""
+                    claims = await run_factual_claim_extractor(full_report_text, provider, config)
+                    if (
+                        isinstance(claims, list)
+                        and len(claims) > 0
+                        and isinstance(claims[0], str)
+                        and not claims[0].startswith("Error")
+                    ):
+                        results = await batch_process_claims(
+                            claims, full_report_text, provider, config,
+                            on_progress=_on_progress,
+                        )
+                        return claims, results
+                    return claims, None
+
+                # --- Single asyncio.run() for the whole pipeline ---
+                try:
+                    pipeline_result = asyncio.run(_run_full_pipeline())
+                    claims: List[str] = pipeline_result[0]
+                    all_results: List[Dict[str, Any]] | None = pipeline_result[1]
+                except Exception as pipeline_err:
+                    logger.error("Pipeline failed: %s", pipeline_err, exc_info=True)
+                    claims = []
+                    all_results = None
+                    st.warning(f"Pipeline error: {pipeline_err}")
+
+                phase1_elapsed = time.perf_counter() - phase1_start
+
+                if all_results is not None:
                     total_claims = len(claims)
-                    st.write(f"✅ Found {total_claims} claims. Starting batch processing...")
-                    
-                    progress_bar = status.progress(0)
-                    processed_count = 0
-                    
-                    # Run Parallel Batch Processing
-                    for result in batch_process_claims(claims, report_input, provider, config):
-                        st.session_state.analysis_results.append(result)
-                        processed_count += 1
-                        progress_bar.progress(processed_count / total_claims)
-                    
-                    progress_bar.progress(1.0)
-                    status.update(label="Analysis Complete!", state="complete", expanded=False)
+                    progress_bar.progress(1.0, text=f"✅ All {total_claims} claims analyzed.")
+                    progress_status.empty()
+
+                    # Show per-claim progress lines
+                    for line in _progress_lines:
+                        st.write(line)
+
+                    st.write(f"⏱️ **Pipeline completed in {phase1_elapsed:.1f}s**")
+                    status.update(label=f"Analysis Complete — {total_claims} claims in {phase1_elapsed:.1f}s", state="complete", expanded=False)
+
+                    st.session_state.analysis_results = list(all_results) if all_results else _results_collector
                     st.session_state.processing_complete = True
+                    logger.info("Analysis complete | claims=%d elapsed=%.2fs", total_claims, phase1_elapsed)
                     save_to_db(report_input, st.session_state.analysis_results, provider)
                 else:
                     status.update(label="Extraction Failed", state="error")
+                    logger.error("Claim extraction failed | output=%s", claims)
                     st.error(f"Could not extract claims. Output: {claims}")
 
     # Results for New Analysis
     if st.session_state.processing_complete and st.session_state.analysis_results:
-        st.markdown("## Analysis Results")
-        st.caption("Select a row to view detailed evidence and reasoning.")
+        col_header, col_clear = st.columns([8, 2])
+        with col_header:
+            st.markdown("## Analysis Results")
+            st.caption("Select a row to view detailed evidence and reasoning.")
+        with col_clear:
+            st.markdown("")  # spacer to align button vertically
+            if st.button("Clear Results", type="secondary"):
+                st.session_state.analysis_results = []
+                st.session_state.processing_complete = False
+                st.rerun()
         
         display_data = []
         score_labels = {
@@ -199,8 +316,9 @@ with tab_new:
             }
         )
         
-        if event and event.selection and event.selection.rows:
-            selected_index = event.selection.rows[0]
+        selected_rows = get_selected_rows(event)
+        if selected_rows:
+            selected_index = selected_rows[0]
             selected_claim_data = st.session_state.analysis_results[selected_index]
             show_claim_details(selected_claim_data)
 
@@ -268,7 +386,8 @@ with tab_history:
             )
             
             # Handle History Selection
-            if history_event and history_event.selection and history_event.selection.rows:
-                h_index = history_event.selection.rows[0]
+            selected_history_rows = get_selected_rows(history_event)
+            if selected_history_rows:
+                h_index = selected_history_rows[0]
                 h_data = flattened_history[h_index]["FullData"]
                 show_claim_details(h_data)

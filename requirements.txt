@@ -1,6 +1,9 @@
 streamlit
 pydantic
-ddgs
+beautifulsoup4
+wikipedia
+truststore
 google-genai
 openai
 python-dotenv
+watchdog

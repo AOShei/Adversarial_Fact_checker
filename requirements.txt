@@ -1,0 +1,6 @@
+streamlit
+pydantic
+ddgs
+google-genai
+openai
+python-dotenv

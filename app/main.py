@@ -99,7 +99,7 @@ with st.sidebar:
              st.success("Configuration Loaded")
 
 st.title("Adversarial Fact Checker")
-st.caption("Claims are scored using the NATO Intelligence Evaluation System to determine truthfulness.")
+st.caption("Claims are scored using the NATO Intelligence Evaluation System to determine truthfulness and source reliability.")
 
 # --- CONTEXT DIALOG (MODAL) ---
 @st.dialog("Claim Analysis Details", width="large")
@@ -178,17 +178,17 @@ tab_new, tab_history = st.tabs(["Analyze", "History"])
 
 # --- TAB 1: NEW ANALYSIS ---
 with tab_new:
-    report_input = st.text_area("Paste Report / Text to Analyze:", height=150)
+    report_input = st.text_area("Paste Report / Text to Analyze:", height=150, key="report_input")
 
     # Optional source metadata — helps the LLM understand provenance
     with st.expander("Source Details (optional)", expanded=False):
         meta_cols = st.columns(3)
         with meta_cols[0]:
-            source_publisher = st.text_input("Publisher / Organisation", placeholder="e.g. WHO, Reuters, Fox News")
+            source_publisher = st.text_input("Publisher / Organisation", placeholder="e.g. WHO, Reuters, Fox News", key="source_publisher")
         with meta_cols[1]:
-            source_author = st.text_input("Author(s)", placeholder="e.g. Jane Smith")
+            source_author = st.text_input("Author(s)", placeholder="e.g. Jane Smith", key="source_author")
         with meta_cols[2]:
-            source_date = st.text_input("Publication Date", placeholder="e.g. March 2024")
+            source_date = st.text_input("Publication Date", placeholder="e.g. March 2024", key="source_date")
 
     # Run Button Logic
     if st.button("Run Analysis", type="primary"):
@@ -325,6 +325,10 @@ with tab_new:
             if st.button("Clear Results", type="secondary"):
                 st.session_state.analysis_results = []
                 st.session_state.processing_complete = False
+                st.session_state.report_input = ""
+                st.session_state.source_publisher = ""
+                st.session_state.source_author = ""
+                st.session_state.source_date = ""
                 st.rerun()
         
         display_data = []

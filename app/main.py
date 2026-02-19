@@ -105,27 +105,56 @@ st.caption("Claims are scored using the NATO Intelligence Evaluation System to d
 @st.dialog("Claim Analysis Details", width="large")
 def show_claim_details(claim_data: Dict[str, Any]):
     score = claim_data.get('arbiter_score', 6)
+    reliability = claim_data.get('source_reliability_score', 'F')
+
     score_meta = {
-        1: {"color": "#27ae60", "label": "Confirmed True"},   # Green
+        1: {"color": "#27ae60", "label": "Confirmed"},       # Green
         2: {"color": "#2ecc71", "label": "Probably True"},    # Light Green
         3: {"color": "#f39c12", "label": "Possibly True"},    # Orange
         4: {"color": "#e67e22", "label": "Doubtful"},         # Dark Orange
         5: {"color": "#c0392b", "label": "Improbable"},       # Red
-        6: {"color": "#7f8c8d", "label": "Uncertain"}         # Grey
+        6: {"color": "#7f8c8d", "label": "Truth Cannot Be Judged"}  # Grey
     }
-    meta = score_meta.get(score, score_meta[6])
+    reliability_meta = {
+        "A": {"color": "#27ae60", "label": "Completely Reliable"},
+        "B": {"color": "#2ecc71", "label": "Usually Reliable"},
+        "C": {"color": "#f39c12", "label": "Fairly Reliable"},
+        "D": {"color": "#e67e22", "label": "Not Usually Reliable"},
+        "E": {"color": "#c0392b", "label": "Unreliable"},
+        "F": {"color": "#7f8c8d", "label": "Reliability Cannot Be Judged"},
+    }
+    s_meta = score_meta.get(score, score_meta[6])
+    r_meta = reliability_meta.get(reliability, reliability_meta["F"])
     
     st.markdown(f"### Claim: *{claim_data['claim']}*")
     
-    # Verdict Badge
+    # NATO Combined Rating Badge
     st.markdown(
-        f"""<div style="background-color: {meta['color']}; padding: 10px; border-radius: 8px; color: white; text-align: center; font-weight: bold; margin-bottom: 20px;">
-        VERDICT: {score} - {meta['label']}
+        f"""<div style="background-color: {s_meta['color']}; padding: 10px; border-radius: 8px; color: white; text-align: center; font-weight: bold; margin-bottom: 10px;">
+        NATO RATING: {reliability}{score} — {r_meta['label']} / {s_meta['label']}
         </div>""", 
         unsafe_allow_html=True
     )
-    
-    st.markdown(f"**Justification:** {claim_data['arbiter_justification']}")
+
+    # Individual badges side by side
+    col_truth, col_rel = st.columns(2)
+    with col_truth:
+        st.markdown(
+            f"""<div style="background-color: {s_meta['color']}; padding: 8px; border-radius: 6px; color: white; text-align: center; font-size: 0.9rem;">
+            Truthfulness: {score} — {s_meta['label']}
+            </div>""",
+            unsafe_allow_html=True
+        )
+    with col_rel:
+        st.markdown(
+            f"""<div style="background-color: {r_meta['color']}; padding: 8px; border-radius: 6px; color: white; text-align: center; font-size: 0.9rem;">
+            Source Reliability: {reliability} — {r_meta['label']}
+            </div>""",
+            unsafe_allow_html=True
+        )
+
+    st.markdown(f"**Truthfulness Justification:** {claim_data.get('arbiter_justification', '')}")
+    st.markdown(f"**Source Reliability Justification:** {claim_data.get('source_reliability_justification', 'N/A')}")
     st.divider()
     
     t1, t2, t3 = st.tabs(["🗪 Debate", "📄 Internal Evidence", "🌐 External Evidence"])
@@ -203,18 +232,25 @@ with tab_new:
                 _results_collector: List[Dict[str, Any]] = []
                 _progress_lines: List[str] = []
                 score_labels = {
-                    1: "Confirmed True", 2: "Probably True", 3: "Possibly True",
-                    4: "Doubtful", 5: "Improbable", 6: "Uncertain"
+                    1: "Confirmed", 2: "Probably True", 3: "Possibly True",
+                    4: "Doubtful", 5: "Improbable", 6: "Truth Cannot Be Judged"
+                }
+                reliability_labels = {
+                    "A": "Completely Reliable", "B": "Usually Reliable",
+                    "C": "Fairly Reliable", "D": "Not Usually Reliable",
+                    "E": "Unreliable", "F": "Reliability Cannot Be Judged"
                 }
 
                 def _on_progress(completed: int, total: int, result: Dict[str, Any]) -> None:
                     """Callback fired each time a claim finishes."""
                     _results_collector.append(result)
                     score = result.get("arbiter_score", 6)
-                    label = score_labels.get(score, "Unknown")
+                    reliability = result.get("source_reliability_score", "F")
+                    s_label = score_labels.get(score, "Unknown")
+                    r_label = reliability_labels.get(reliability, "Unknown")
                     claim_text = result.get("claim", "")[:90]
                     _progress_lines.append(
-                        f"✅ Claim {completed}/{total}: *{claim_text}* — **{score} ({label})**"
+                        f"✅ Claim {completed}/{total}: *{claim_text}* — **{reliability}{score} ({r_label} / {s_label})**"
                     )
                     # ── Live progress bar update ──
                     if total > 0:
@@ -223,7 +259,7 @@ with tab_new:
                             text=f"Analyzed {completed}/{total} claims...",
                         )
                         progress_status.markdown(
-                            f"Latest: *{claim_text}* — **{score} ({label})**"
+                            f"Latest: *{claim_text}* — **{reliability}{score} ({r_label} / {s_label})**"
                         )
 
                 async def _run_full_pipeline() -> tuple:
@@ -239,6 +275,7 @@ with tab_new:
                         results = await batch_process_claims(
                             claims, full_report_text, provider, config,
                             on_progress=_on_progress,
+                            source_metadata=metadata_preamble if metadata_parts else "",
                         )
                         return claims, results
                     return claims, None
@@ -292,14 +329,21 @@ with tab_new:
         
         display_data = []
         score_labels = {
-            1: "Confirmed True", 2: "Probably True", 3: "Possibly True",
-            4: "Doubtful", 5: "Improbable", 6: "Uncertain"
+            1: "Confirmed", 2: "Probably True", 3: "Possibly True",
+            4: "Doubtful", 5: "Improbable", 6: "Truth Cannot Be Judged"
+        }
+        reliability_labels = {
+            "A": "Completely Reliable", "B": "Usually Reliable",
+            "C": "Fairly Reliable", "D": "Not Usually Reliable",
+            "E": "Unreliable", "F": "Reliability Cannot Be Judged"
         }
         
         for idx, res in enumerate(st.session_state.analysis_results):
+            r = res.get('source_reliability_score', 'F')
+            s = res['arbiter_score']
             display_data.append({
                 "Claim": res["claim"],
-                "Verdict": f"{res['arbiter_score']} - {score_labels.get(res['arbiter_score'], 'Unknown')}",
+                "Verdict": f"{r}{s} - {reliability_labels.get(r, 'Unknown')} / {score_labels.get(s, 'Unknown')}",
                 "Score": res["arbiter_score"] # Hidden sortable column
             })
             
@@ -339,8 +383,13 @@ with tab_history:
         # Flatten the data: [ {Timestamp, Claim, Verdict, FullData}, ... ]
         flattened_history = []
         score_labels = {
-            1: "Confirmed True", 2: "Probably True", 3: "Possibly True",
-            4: "Doubtful", 5: "Improbable", 6: "Uncertain"
+            1: "Confirmed", 2: "Probably True", 3: "Possibly True",
+            4: "Doubtful", 5: "Improbable", 6: "Truth Cannot Be Judged"
+        }
+        reliability_labels = {
+            "A": "Completely Reliable", "B": "Usually Reliable",
+            "C": "Fairly Reliable", "D": "Not Usually Reliable",
+            "E": "Unreliable", "F": "Reliability Cannot Be Judged"
         }
 
         for row in history_rows:
@@ -353,12 +402,14 @@ with tab_history:
                         # Filter by search query if present
                         if search_query and (search_query.lower() not in res['claim'].lower()):
                             continue
-                            
+
+                        r = res.get('source_reliability_score', 'F')
+                        s = res.get('arbiter_score', 6)
                         flattened_history.append({
                             "Timestamp": timestamp,
                             "Claim": res["claim"],
-                            "Verdict": f"{res['arbiter_score']} - {score_labels.get(res['arbiter_score'], 'Unknown')}",
-                            "Score": res['arbiter_score'],
+                            "Verdict": f"{r}{s} - {reliability_labels.get(r, 'Unknown')} / {score_labels.get(s, 'Unknown')}",
+                            "Score": res.get('arbiter_score', 6),
                             "FullData": res # Store full object for the modal
                         })
             except:

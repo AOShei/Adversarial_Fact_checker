@@ -23,6 +23,7 @@ async def process_single_claim(
     report_text: str,
     provider: str,
     config: Dict[str, Any],
+    source_metadata: str = "",
 ) -> Dict[str, Any]:
     """
     Runs the full analysis pipeline for a single claim with intra-claim parallelism.
@@ -55,13 +56,19 @@ async def process_single_claim(
         analysis.advocate_summary = advocate_summary
         logger.info("Claim %d stage-2 done (debate) | elapsed=%.2fs", claim_index, time.perf_counter() - start)
 
-        # Stage 3 – arbiter
-        score, justification = await run_arbiter(claim, devils_summary, advocate_summary, provider, config)
+        # Stage 3 – arbiter (pass web evidence + source metadata for reliability rating)
+        score, justification, reliability, reliability_justification = await run_arbiter(
+            claim, devils_summary, advocate_summary, provider, config,
+            web_evidence=web_evidence,
+            source_metadata=source_metadata,
+        )
         analysis.arbiter_score = score
         analysis.arbiter_justification = justification
+        analysis.source_reliability_score = reliability
+        analysis.source_reliability_justification = reliability_justification
 
         elapsed = time.perf_counter() - start
-        logger.info("Claim %d DONE  | score=%d elapsed=%.2fs | '%s'", claim_index, score, elapsed, claim_short)
+        logger.info("Claim %d DONE  | score=%d reliability=%s elapsed=%.2fs | '%s'", claim_index, score, reliability, elapsed, claim_short)
         return analysis.model_dump()
 
     except Exception as e:
@@ -70,7 +77,9 @@ async def process_single_claim(
         error_analysis = ClaimAnalysis(
             claim=claim,
             arbiter_score=6,
-            arbiter_justification=f"Processing Error: {str(e)}"
+            arbiter_justification=f"Processing Error: {str(e)}",
+            source_reliability_score="F",
+            source_reliability_justification="",
         )
         return error_analysis.model_dump()
 
@@ -82,6 +91,7 @@ async def batch_process_claims(
     config: Dict[str, Any],
     max_workers: int = 5,
     on_progress: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+    source_metadata: str = "",
 ) -> List[Dict[str, Any]]:
     """
     Process all claims concurrently, bounded by a semaphore.
@@ -103,7 +113,7 @@ async def batch_process_claims(
     async def _bounded_process(claim: str, idx: int) -> Dict[str, Any]:
         nonlocal completed_count
         async with semaphore:
-            result = await process_single_claim(claim, idx, report_text, provider, config)
+            result = await process_single_claim(claim, idx, report_text, provider, config, source_metadata=source_metadata)
         completed_count += 1
         if on_progress:
             on_progress(completed_count, total, result)

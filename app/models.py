@@ -9,3 +9,5 @@ class ClaimAnalysis(BaseModel):
     advocate_summary: str = ""
     arbiter_score: int = 6
     arbiter_justification: str = ""
+    source_reliability_score: str = "F"
+    source_reliability_justification: str = ""

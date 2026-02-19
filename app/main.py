@@ -1,19 +1,17 @@
 import sys
 import os
-# Add the project root to sys.path to allow importing from 'app'
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-import streamlit as st
 import json
 import time
 from typing import List, Dict, Any
 from dotenv import load_dotenv
+import streamlit as st
 
-from app.database import init_db, save_to_db
+# Add the project root to sys.path to allow importing from 'app'
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from app.database import init_db, save_to_db, get_history
 from app.models import ClaimAnalysis
-from app.agents import (
-    run_factual_claim_extractor,
-)
+from app.agents import run_factual_claim_extractor
 from app.pipeline import batch_process_claims
 
 # Load environment variables
@@ -50,9 +48,9 @@ st.markdown("""
 
 init_db()
 
-# Initialize Session State for Results Persistence
+# Initialize Session State
 if "analysis_results" not in st.session_state:
-    st.session_state.analysis_results = [] # Stores full dictionaries
+    st.session_state.analysis_results = []
 if "processing_complete" not in st.session_state:
     st.session_state.processing_complete = False
 
@@ -81,7 +79,7 @@ with st.sidebar:
         else:
              st.success("Configuration Loaded")
 
-st.title("Adversarial Truth Arbiter")
+st.title("Adversarial Fact Checker")
 
 # --- CONTEXT DIALOG (MODAL) ---
 @st.dialog("Claim Analysis Details", width="large")
@@ -110,7 +108,7 @@ def show_claim_details(claim_data: Dict[str, Any]):
     st.markdown(f"**Justification:** {claim_data['arbiter_justification']}")
     st.divider()
     
-    t1, t2, t3 = st.tabs(["🤺 Debate", "📄 Internal Evidence", "🌐 External Evidence"])
+    t1, t2, t3 = st.tabs(["🗪 Debate", "📄 Internal Evidence", "🌐 External Evidence"])
     
     with t1:
         c1, c2 = st.columns(2)
@@ -126,84 +124,151 @@ def show_claim_details(claim_data: Dict[str, Any]):
         st.caption("Web Sources:")
         st.markdown(claim_data['web_evidence'])
 
+# --- TABS: NEW ANALYSIS vs HISTORY ---
+tab_new, tab_history = st.tabs(["Analyze", "History"])
 
-# --- MAIN UI ---
-report_input = st.text_area("Paste Report / Text to Analyze:", height=150)
+# --- TAB 1: NEW ANALYSIS ---
+with tab_new:
+    report_input = st.text_area("Paste Report / Text to Analyze:", height=150)
 
-# Run Button Logic
-if st.button("Run Analysis", type="primary"):
-    if not report_input.strip():
-        st.warning("Please provide text to analyze.")
-    elif ((provider == "Google Gemini" and not config.get("gemini_key")) or 
-          (provider == "Microsoft Azure" and not config.get("azure_key"))):
-        st.error(f"Please configure {provider} API keys in your .env file.")
-    else:
-        # Reset State
-        st.session_state.analysis_results = []
-        st.session_state.processing_complete = False
-        
-        with st.status("Initializing Analysis Pipeline...", expanded=True) as status:
-            st.write("🔍 **Phase 1:** Extracting Factual Claims...")
-            claims = run_factual_claim_extractor(report_input, provider, config)
+    # Run Button Logic
+    if st.button("Run Analysis", type="primary"):
+        if not report_input.strip():
+            st.warning("Please provide text to analyze.")
+        elif ((provider == "Google Gemini" and not config.get("gemini_key")) or 
+              (provider == "Microsoft Azure" and not config.get("azure_key"))):
+            st.error(f"Please configure {provider} API keys in your .env file.")
+        else:
+            # Reset State
+            st.session_state.analysis_results = []
+            st.session_state.processing_complete = False
             
-            if isinstance(claims, list) and len(claims) > 0 and isinstance(claims[0], str) and not claims[0].startswith("Error"):
-                total_claims = len(claims)
-                st.write(f"✅ Found {total_claims} claims. Starting batch processing...")
+            with st.status("Initializing Analysis Pipeline...", expanded=True) as status:
+                st.write("🔍 **Phase 1:** Extracting Factual Claims...")
+                claims = run_factual_claim_extractor(report_input, provider, config)
                 
-                progress_bar = status.progress(0)
-                processed_count = 0
-                
-                # Run Parallel Batch Processing
-                for result in batch_process_claims(claims, report_input, provider, config):
-                    st.session_state.analysis_results.append(result)
-                    processed_count += 1
-                    progress_bar.progress(processed_count / total_claims)
-                    # Optional: Update status text with latest claim processed
-                    # st.write(f"Processed: {result['claim'][:50]}...")
-                
-                progress_bar.progress(1.0)
-                status.update(label="Analysis Complete!", state="complete", expanded=False)
-                st.session_state.processing_complete = True
-                save_to_db(report_input, st.session_state.analysis_results, provider)
-            else:
-                status.update(label="Extraction Failed", state="error")
-                st.error(f"Could not extract claims. Output: {claims}")
+                if isinstance(claims, list) and len(claims) > 0 and isinstance(claims[0], str) and not claims[0].startswith("Error"):
+                    total_claims = len(claims)
+                    st.write(f"✅ Found {total_claims} claims. Starting batch processing...")
+                    
+                    progress_bar = status.progress(0)
+                    processed_count = 0
+                    
+                    # Run Parallel Batch Processing
+                    for result in batch_process_claims(claims, report_input, provider, config):
+                        st.session_state.analysis_results.append(result)
+                        processed_count += 1
+                        progress_bar.progress(processed_count / total_claims)
+                    
+                    progress_bar.progress(1.0)
+                    status.update(label="Analysis Complete!", state="complete", expanded=False)
+                    st.session_state.processing_complete = True
+                    save_to_db(report_input, st.session_state.analysis_results, provider)
+                else:
+                    status.update(label="Extraction Failed", state="error")
+                    st.error(f"Could not extract claims. Output: {claims}")
 
-# --- RESULTS DISPLAY (Dataframe with Selection) ---
-if st.session_state.processing_complete and st.session_state.analysis_results:
-    st.markdown("## Analysis Results")
-    st.caption("Select a row to view detailed evidence and reasoning.")
-    
-    # Prepare data for dataframe display (flattened for table)
-    display_data = []
-    score_labels = {
-        1: "Confirmed True", 2: "Probably True", 3: "Possibly True",
-        4: "Doubtful", 5: "Improbable", 6: "Uncertain"
-    }
-    
-    for idx, res in enumerate(st.session_state.analysis_results):
-        display_data.append({
-            "Claim": res["claim"],
-            "Verdict": f"{res['arbiter_score']} - {score_labels.get(res['arbiter_score'], 'Unknown')}",
-            "Score": res["arbiter_score"] # Hidden sortable column
-        })
+    # Results for New Analysis
+    if st.session_state.processing_complete and st.session_state.analysis_results:
+        st.markdown("## Analysis Results")
+        st.caption("Select a row to view detailed evidence and reasoning.")
         
-    # Display Interactive Dataframe
-    event = st.dataframe(
-        display_data,
-        on_select="rerun",
-        selection_mode="single-row",
-        width="stretch", 
-        hide_index=True,
-        column_config={
-            "Claim": st.column_config.TextColumn("Claim", width="large"),
-            "Verdict": st.column_config.TextColumn("Verdict", width="medium"),
-            "Score": None # Hide the raw score column
+        display_data = []
+        score_labels = {
+            1: "Confirmed True", 2: "Probably True", 3: "Possibly True",
+            4: "Doubtful", 5: "Improbable", 6: "Uncertain"
         }
-    )
+        
+        for idx, res in enumerate(st.session_state.analysis_results):
+            display_data.append({
+                "Claim": res["claim"],
+                "Verdict": f"{res['arbiter_score']} - {score_labels.get(res['arbiter_score'], 'Unknown')}",
+                "Score": res["arbiter_score"] # Hidden sortable column
+            })
+            
+        event = st.dataframe(
+            display_data,
+            on_select="rerun",
+            selection_mode="single-row",
+            width="stretch", # Auto
+            hide_index=True,
+            column_config={
+                "Claim": st.column_config.TextColumn("Claim", width="large"),
+                "Verdict": st.column_config.TextColumn("Verdict", width="medium"),
+                "Score": None
+            }
+        )
+        
+        if event and event.selection and event.selection.rows:
+            selected_index = event.selection.rows[0]
+            selected_claim_data = st.session_state.analysis_results[selected_index]
+            show_claim_details(selected_claim_data)
+
+# --- TAB 2: HISTORY (FLATTENED CLAIM LIST) ---
+with tab_history:
+    st.header("Claim History")
     
-    # Handle Selection Event
-    if event and event.selection and event.selection.rows:
-        selected_index = event.selection.rows[0]
-        selected_claim_data = st.session_state.analysis_results[selected_index]
-        show_claim_details(selected_claim_data)
+    # Search Bar
+    search_query = st.text_input("Search Claims:", placeholder="Enter keywords...")
+
+    # Fetch all history (or limit to a reasonable number like 100 recent reports to avoid DB load)
+    # Note: For production, we'd want pagination. For MVP, fetching last 50 reports is fine.
+    history_rows = get_history(limit=50) 
+    
+    if not history_rows:
+        st.info("No history found.")
+    else:
+        # Flatten the data: [ {Timestamp, Claim, Verdict, FullData}, ... ]
+        flattened_history = []
+        score_labels = {
+            1: "Confirmed True", 2: "Probably True", 3: "Possibly True",
+            4: "Doubtful", 5: "Improbable", 6: "Uncertain"
+        }
+
+        for row in history_rows:
+            # row: (id, report_text, analysis_results_json, provider, timestamp)
+            row_id, _, analysis_json, _, timestamp = row
+            try:
+                results = json.loads(analysis_json)
+                if isinstance(results, list):
+                    for res in results:
+                        # Filter by search query if present
+                        if search_query and (search_query.lower() not in res['claim'].lower()):
+                            continue
+                            
+                        flattened_history.append({
+                            "Timestamp": timestamp,
+                            "Claim": res["claim"],
+                            "Verdict": f"{res['arbiter_score']} - {score_labels.get(res['arbiter_score'], 'Unknown')}",
+                            "Score": res['arbiter_score'],
+                            "FullData": res # Store full object for the modal
+                        })
+            except:
+                continue
+        
+        if not flattened_history:
+            st.warning("No claims found matching your search.")
+        else:
+            st.caption(f"Showing {len(flattened_history)} historical claims.")
+            
+            # Display Flattened Table
+            history_event = st.dataframe(
+                flattened_history,
+                on_select="rerun",
+                selection_mode="single-row",
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Timestamp": st.column_config.DatetimeColumn("Date", format="D MMM YYYY, h:mm a", width="small"),
+                    "Claim": st.column_config.TextColumn("Claim", width="large"),
+                    "Verdict": st.column_config.TextColumn("Verdict", width="medium"),
+                    "Score": None,
+                    "FullData": None # Hidden
+                }
+            )
+            
+            # Handle History Selection
+            if history_event and history_event.selection and history_event.selection.rows:
+                h_index = history_event.selection.rows[0]
+                h_data = flattened_history[h_index]["FullData"]
+                show_claim_details(h_data)

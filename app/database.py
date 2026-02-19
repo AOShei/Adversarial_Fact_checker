@@ -1,6 +1,6 @@
 import sqlite3
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 DB_NAME = "analysis_history.db"
 
@@ -29,10 +29,26 @@ def save_to_db(report_text: str, results: List[Dict[str, Any]], provider: str):
     conn.commit()
     conn.close()
 
-def get_history(limit: int = 10):
+def get_history(limit: int = 10) -> List[Tuple]:
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute('SELECT id, report_text, analysis_results, provider, timestamp FROM reports ORDER BY timestamp DESC LIMIT ?', (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def search_history(query: str, limit: int = 20) -> List[Tuple]:
+    """Search history by report text or analysis results (claims)."""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    search_term = f"%{query}%"
+    c.execute('''
+        SELECT id, report_text, analysis_results, provider, timestamp 
+        FROM reports 
+        WHERE report_text LIKE ? OR analysis_results LIKE ?
+        ORDER BY timestamp DESC 
+        LIMIT ?
+    ''', (search_term, search_term, limit))
     rows = c.fetchall()
     conn.close()
     return rows
